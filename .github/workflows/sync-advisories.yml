@@ -1,0 +1,127 @@
+name: Sync security advisories
+
+on:
+  schedule:
+    - cron: "17 * * * *" # hourly, offset to avoid the top-of-hour rush
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log actions without writing"
+        type: boolean
+        default: false
+
+# One-way mirror only. Never writes back to source advisories.
+concurrency:
+  group: sync-advisories
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # check out this repo's code
+      issues: write # create/update mirror issues in THIS repo
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Sync
+        env:
+          # Fine-grained PAT with: source repos -> Security advisories (read);
+          # this repo -> Issues (read/write); org -> Projects (read/write,
+          # for the board's Reported date field). Stored as a repo secret.
+          GITHUB_TOKEN: ${{ secrets.ADVISORY_SYNC_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          # Set the PROJECT_NUMBER repo variable (printed by setup-project.sh)
+          # to enable board date sync; leave it unset to skip the board.
+          PROJECT_NUMBER: ${{ vars.PROJECT_NUMBER }}
+        run: python scripts/sync_advisories.py
+
+  # Split out so the sync job above — which handles embargoed advisory content
+  # under a broad PAT — never holds contents:write. Pushing a branch requires
+  # it, and it cannot be narrowed to one path, so it lives here instead, on a
+  # job that only ever reads issues and writes reports/.
+  report:
+    needs: sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the report branch (cannot be read: git push needs write)
+      issues: read # the report is built from the mirror issues; never writes them
+      pull-requests: write # open/update the report PR
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # The report is rendered from the mirror issues the sync job just
+      # refreshed, so it needs nothing beyond this repo's own Issues:read —
+      # the default GITHUB_TOKEN, not the advisory PAT. Read-only: the script
+      # only ever GETs issues.
+      - name: Render advisory report
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          command -v zsh >/dev/null || {
+            sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+          }
+          mkdir -p reports
+          .github/actions/report-status.zsh \
+            -t "${{ github.repository }}" \
+            -o "${{ github.repository_owner }}" \
+            -O reports/advisory-backlog.md -F
+
+      # Never pushed to the default branch: the report lands as a PR a human
+      # merges. The branch is stable and force-updated, so a backlog that keeps
+      # moving refreshes the open PR instead of stacking up new ones.
+      #
+      # The report carries no timestamp, so an unchanged backlog produces a
+      # byte-identical file, an empty diff against the base and no PR — runs
+      # stay quiet until something actually moves.
+      #
+      # NB: opening the PR needs "Allow GitHub Actions to create and approve
+      # pull requests" enabled for the org/repo (Settings -> Actions -> General).
+      - name: Open report PR
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: bot/advisory-report
+        run: |
+          git config user.name "tracker-bot"
+          git config user.email "tracker-bot@example.org"
+
+          # Branch off the checked-out base so the diff is report-only.
+          git checkout -q -B "$BRANCH"
+          git add reports/
+          if git diff --cached --quiet; then
+            echo "reports/ matches ${GITHUB_REF_NAME}; nothing to propose."
+            exit 0
+          fi
+
+          git commit -q -m "Update advisory report from tracker issues"
+
+          # Rebuilding from the base gives a fresh commit hash every run, so
+          # compare trees instead: without this an open PR would collect an
+          # hourly force-push whose content never changed.
+          remote_tree=""
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin "$BRANCH"
+            remote_tree=$(git rev-parse FETCH_HEAD^{tree})
+          fi
+          if [ "$remote_tree" = "$(git rev-parse HEAD^{tree})" ]; then
+            echo "Open branch already proposes this exact report; leaving it alone."
+            exit 0
+          fi
+
+          # Plain --force: the branch is bot-owned and rebuilt from the base
+          # each run, so there is no local ref to lease against.
+          git push -q --force origin "$BRANCH"
+
+          if [ -n "$(gh pr list --head "$BRANCH" --base "$GITHUB_REF_NAME" \
+                       --state open --json number --jq '.[0].number')" ]; then
+            echo "Existing PR updated."
+          else
+            gh pr create \
+              --base "$GITHUB_REF_NAME" --head "$BRANCH" \
+              --title "Update advisory report" \
+              --body "Regenerated \`reports/advisory-backlog.md\` from the mirror issues in this repo. Opened by the hourly advisory sync; see \`.github/actions/report-status.zsh\`."
+          fi

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability in libparse
+    url: https://github.com/example-org/libparse/security/advisories/new
+    about: File a GitHub Security Advisory on libparse (it will be mirrored here automatically).
+  - name: Report a vulnerability in parse-server
+    url: https://github.com/example-org/parse-server/security/advisories/new
+    about: File a GitHub Security Advisory on parse-server (it will be mirrored here automatically).

@@ -1,0 +1,18 @@
+# Source repositories whose security advisories are mirrored into this tracker.
+#
+# To add a repo, append an entry below and open a PR. The sync workflow reads
+# this file on every run, so no code change is needed.
+#
+# This example watches two fictional repositories. Replace them with your own.
+#
+#   repo:  owner/name on GitHub
+#   label: the repo:* label applied to mirror issues (created by setup-labels.sh)
+#   tag:   short name used in issue titles, e.g. "[libparse] ..."
+
+sources:
+  - repo: example-org/libparse
+    label: "repo:libparse"
+    tag: libparse
+  - repo: example-org/parse-server
+    label: "repo:parse-server"
+    tag: parse-server
